@@ -1,0 +1,49 @@
+name: Build UpstoxLite (Win x64, single-file)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      # Get the official Upstox MarketData V3 .proto
+      - name: Fetch Upstox MarketDataFeedV3.proto
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path Core.Upstox/Proto | Out-Null
+          curl -L `
+            https://raw.githubusercontent.com/upstox/upstox-nodejs/master/examples/websocket/market_data/v3/MarketDataFeedV3.proto `
+            -o Core.Upstox/Proto/MarketDataFeedV3.proto
+      # ^ The .proto originates from Upstox's official SDK examples.
+      #   Reference: https://github.com/upstox/upstox-nodejs/.../MarketDataFeedV3.proto  (see citation)
+      #   This ensures you're aligned with the latest feed schema.
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build -c Release
+
+      - name: Publish single-file EXE (win10-x64)
+        run: >
+          dotnet publish App.WinForms -c Release -r win10-x64
+          /p:PublishSingleFile=true
+          /p:PublishTrimmed=true
+          /p:IncludeNativeLibrariesForSelfExtract=true
+          --self-contained true
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: UpstoxLite-win10-x64
+          path: App.WinForms/bin/Release/net8.0-windows10.0.19041.0/win10-x64/publish/*

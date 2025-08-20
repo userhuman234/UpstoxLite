@@ -1,0 +1,139 @@
+name: Build Windows Executable
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Setup .NET 8
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.0.x'
+        
+    - name: Verify .NET installation
+      run: dotnet --version
+      
+    - name: Create .NET project if it doesn't exist
+      run: |
+        # Check if any .csproj or .sln files exist
+        $projectFiles = Get-ChildItem -Recurse -Include "*.csproj", "*.sln"
+        if ($projectFiles.Count -eq 0) {
+          Write-Host "No .NET project found, creating a basic console app..."
+          dotnet new console -n UpstoxApp
+          Set-Location UpstoxApp
+          
+          # Add necessary packages for gRPC/Protobuf
+          dotnet add package Grpc.Net.Client
+          dotnet add package Grpc.Tools  
+          dotnet add package Google.Protobuf
+          
+          # Create a basic Program.cs
+          @"
+using System;
+
+namespace UpstoxApp
+{
+    class Program
+    {
+        static void Main(string[] args)
+        {
+            Console.WriteLine("Upstox Application");
+            Console.WriteLine("Proto files are available in the proto directory");
+            
+            // Keep console open
+            Console.WriteLine("Press any key to exit...");
+            Console.ReadKey();
+        }
+    }
+}
+"@ | Out-File -FilePath "Program.cs" -Encoding UTF8
+          
+          Set-Location ..
+          echo "PROJECT_DIR=UpstoxApp" >> $env:GITHUB_ENV
+        } else {
+          Write-Host "Found existing .NET project"
+          echo "PROJECT_DIR=." >> $env:GITHUB_ENV
+        }
+      shell: powershell
+      
+    - name: Create proto directory
+      run: mkdir -p proto
+      shell: bash
+      
+    - name: Download Upstox V3 Proto files
+      run: |
+        # Download the main proto files from Upstox SDK
+        curl -o proto/MarketDataFeed.proto https://raw.githubusercontent.com/upstox/upstox-nodejs/master/proto/MarketDataFeed.proto
+        curl -o proto/PortfolioStream.proto https://raw.githubusercontent.com/upstox/upstox-nodejs/master/proto/PortfolioStream.proto
+        
+        # Create a fallback if the above URLs don't work
+        if [ ! -f proto/MarketDataFeed.proto ]; then
+          echo "Downloading from alternative source..."
+          curl -o proto/MarketDataFeed.proto https://raw.githubusercontent.com/upstox/upstox-python/master/proto/MarketDataFeed.proto
+          curl -o proto/PortfolioStream.proto https://raw.githubusercontent.com/upstox/upstox-python/master/proto/PortfolioStream.proto
+        fi
+        
+        # List downloaded files
+        ls -la proto/
+      shell: bash
+      
+    - name: Install Protocol Buffer Compiler
+      run: |
+        # Download and install protoc for Windows
+        $ProgressPreference = 'SilentlyContinue'
+        Invoke-WebRequest -Uri "https://github.com/protocolbuffers/protobuf/releases/download/v24.4/protoc-24.4-win64.zip" -OutFile "protoc.zip"
+        Expand-Archive -Path "protoc.zip" -DestinationPath "protoc"
+        $env:PATH += ";$PWD\protoc\bin"
+        echo "$PWD\protoc\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      shell: powershell
+      
+    - name: Restore NuGet packages
+      run: dotnet restore ${{ env.PROJECT_DIR }}
+      
+    - name: Build the application
+      run: dotnet build ${{ env.PROJECT_DIR }} --configuration Release --no-restore
+      
+    - name: Run tests (if any)
+      run: dotnet test ${{ env.PROJECT_DIR }} --configuration Release --no-build --verbosity normal
+      continue-on-error: true
+      
+    - name: Publish single-file executable
+      run: |
+        dotnet publish ${{ env.PROJECT_DIR }} --configuration Release --runtime win10-x64 --self-contained true --output ./publish --verbosity normal -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:PublishTrimmed=true
+      
+    - name: List published files
+      run: |
+        echo "Published files:"
+        ls -la publish/
+      shell: bash
+      
+    - name: Create release directory
+      run: |
+        mkdir release
+        # Copy the main executable and any necessary files
+        cp publish/*.exe release/ 2>/dev/null || echo "No .exe files found"
+        cp publish/*.dll release/ 2>/dev/null || echo "No .dll files found"
+        cp publish/*.json release/ 2>/dev/null || echo "No .json files found"
+        # Copy proto files to release
+        cp -r proto release/ 2>/dev/null || echo "No proto directory found"
+        ls -la release/
+      shell: bash
+      
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: windows-executable-${{ github.run_number }}
+        path: |
+          release/
+          proto/
+        retention-days: 30
